@@ -1,0 +1,20 @@
+{
+  "name": "bhiv-http-server",
+  "version": "1.0.0",
+  "description": "A Bhiv module to handle http requests",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "body-parser": "^1.18.2",
+    "cookie-parser": "^1.4.3",
+    "express": "^4.16.2",
+    "formidable": "^1.1.1",
+    "mime": "^2.0.3",
+    "underscore.string": "^3.3.4"
+  }
+}

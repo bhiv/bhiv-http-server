@@ -1,0 +1,15 @@
+---
+  Data:
+    HTTP.Server:
+      ip: 127.0.0.1
+      port: 8080
+      middleware:
+        body-parser:
+          json: {}
+          urlencoded:
+            extended: true
+          raw:
+            inflate: true
+            limit: '100kb'
+        cookie-parser:
+          secret: null
