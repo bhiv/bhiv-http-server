@@ -6,9 +6,7 @@ import formidable   from 'formidable';
 import mime         from 'mime';
 import S            from 'underscore.string';
 import url          from 'url';
-
-//import fs from 'fs';
-
+import fs           from 'fs';
 
 export default function (node, logger) {
 
@@ -104,25 +102,70 @@ export default function (node, logger) {
     .  When(/^proxy$/i).then(':write-output-proxypass')
     .  Otherwise()
     .    then( ':write-output-error'
-             , { response: '$:response', output: { message: 'Bad response type' } }
+             , { response: '$:response', error: { message: 'Bad response type' } }
              )
     .  end()
     .end();
 
-  node.on('write-output-html', function ({ response, output }, callback) {
-    if (output.code == null) output.code = 200;
-    if (output.headers == null) output.headers = {};
-    output.body = output.content;
-    output.headers['Content-Type'] = 'text/html; charset=UTF-8';
-    output.headers['Content-Length'] = output.body.length;
-    return this.node.send(':write-output-generic', { response, output }, callback);
+  node.on('write-output-error', function ({ response, error }) {
+    logger.error(error);
+    const code = error.code == 'ENOENT' ? 404
+      : (error.code | 0) == error.code ? error.code
+      : 500;
+    const headers = error.headers || { 'Content-Type': 'text/plain' };
+    response.writeHead(code, headers);
+    response.end(error.message);
+    return null;
   });
 
   node.on('write-output-generic', function ({ response, output }) {
     if (output == null) return ;
-    response.writeHead(output.code, output.headers);
+    response.writeHead(output.code || 200, output.headers || {});
     response.end(output.body);
     return null;
   });
+
+  node.on('write-output-html', function ({ response, output }, callback) {
+    const params = Bhiv.Util.copy(output);
+    params.body = params.content;
+    if (params.headers == null) params.headers = {};
+    params.headers['Content-Type'] = 'text/html; charset=UTF-8';
+    params.headers['Content-Length'] = params.body.length;
+    return this.node.send(':write-output-generic', { response, output: params }, callback);
+  });
+
+  node.on('write-output-file', function ({ response, output }, callback) {
+    const params = Bhiv.Util.copy(output);
+    if (params.headers == null) params.headers = {};
+    const lowerCase = s => String.prototype.toLowerCase.call(s);
+    if (!~Object.keys(params.headers).map(lowerCase).indexOf('content-type'))
+      params.headers['Content-Type'] = mime.getType(params.filepath);
+    try {
+      const file = fs.createReadStream(params.filepath);
+      file.pipe(response);
+      file.on('start', () => { response.writeHead(params.code || 200, params.headers); });
+      file.on('error', error => {
+        return this.node.send(':write-output-file-error', { response, output, error }, callback);
+      });
+    } catch (error) {
+      return this.node.send(':write-output-file-error', { response, output, error }, callback);
+    }
+  });
+
+  node.on('write-output-file-error', function ({ response, output, error }, callback) {
+    const payload = { response, error };
+    return fs.stat(output.filepath, (error, stats) => {
+      if (error) {
+        payload.error = error;
+        return this.node.send(':write-output-error', payload, callback);
+      }
+      if (!stats.isFile()) {
+        payload.error = Bhiv.Util.wrapError(output.filepath + ' is not a file');
+        return this.node.send(':write-output-error', payload, callback);
+      }
+      return this.node.send(':write-output-error', payload, callback);
+    });
+  });
+
 
 };
