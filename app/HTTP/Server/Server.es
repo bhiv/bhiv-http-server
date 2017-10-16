@@ -29,14 +29,14 @@ export default function (node, logger) {
       routes.push(route);
     }
     routes.sort((left, right) => left.path < right.path).map(route => {
+      if (route.method == null) route.method = 'get';
       const method = route.method.toLowerCase();
       logger.info('New route %s:%s %s %s', this.node.cwd(), route.name, route.method, route.path);
       server[method](route.path, (request, response) => {
-        return node.newest().begin()
-          .then(':prepare-transaction').replace('input')
-          .then(route.handler, '$:input').replace('output')
-          .then(':write-output')
-          .end({ route, request, response }, error => { if (error) logger.error(error) });
+        return node.newest().send( ':handle-request'
+                                 , { route, request, response }
+                                 , error => { if (error) logger.error(error) }
+                                 );
       });
     });
 
@@ -49,36 +49,62 @@ export default function (node, logger) {
     return callback(null, slice);
   });
 
-  node.on('prepare-transaction', function ({ route, request, response }, callback) {
+  node.on('handle-request')
+    .then(':prepare-input-default').replace('input')
+    .then(':prepare-input-config').replace('input')
+    .then(':prepare-input-content').replace('input')
+    .Match('$:route.handler')
+    .  WhenType('String').then('{route.handler}', '$:input')
+    .  Otherwise().then(':write-output-from-route')
+    .  end().replace('output')
+    .then(':write-output')
+    .end()
+
+  node.on('prepare-input-default', function ({ route, request, response }) {
     logger.log('%s %s %s', route.name, request.method, request.url);
     const payload = {};
-    payload.http    = { request, response, route: Bhiv.Util.copy(route) };
-    payload.url     = request.url;
-    payload.headers = request.headers;
-    payload.params  = request.params;
-    payload.query   = url.parse(request.url, true).query;
-    payload.cookies = request.cookies;
-    payload.session = null;
-    payload.body    = null;
-    payload.files   = null;
+    payload.http        = { request, response, route: Bhiv.Util.copy(route) };
+    payload.url         = request.url;
+    payload.relativeUrl = request.url[0] == '/' ? request.url.substr(1) : request.url;
+    payload.headers     = request.headers;
+    payload.params      = request.params;
+    payload.query       = url.parse(request.url, true).query;
+    payload.cookies     = request.cookies;
+    payload.session     = null;
+    payload.body        = null;
+    payload.files       = null;
+    return payload;
+  });
+
+  node.on('prepare-input-config', function (payload, callback) {
+    const { route, input } = payload;
+    if (route.merge == null) return callback(null, input);
+    return this.run(route.merge, payload, (err, options) => {
+      if (err) return callback(err);
+      const result = Bhiv.Util.merge(input, options);
+      return callback(null, options);
+    });
+  });
+
+  node.on('prepare-input-content', function ({ request, input }, callback) {
     const contentType = (request.headers['content-type'] || '').split(';')[0] || 'none';
     switch (contentType) {
     case 'application/octet-stream':
-      payload.body = request.body.toString();
-      return callback(null, payload);
+      input.body = request.body.toString();
+      return callback(null, input);
     case 'application/x-www-form-urlencoded':
     case 'application/json':
-      payload.body = request.body;
-      return callback(null, payload);
+      input.body = request.body;
+      return callback(null, input);
     default : case 'none':
-      return callback(null, payload);
+      return callback(null, input);
     case 'multipart/form-data':
       const opts = node.get('Formidable') || {};
       const form = new formidable.IncomingForm(opts);
       return form.parse(request, (err, fields, files) => {
-        payload.body  = fields;
-        payload.files = files;
-        return callback(null, payload);
+        input.body  = fields;
+        input.files = files;
+        return callback(null, input);
       });
     }
   });
@@ -106,6 +132,11 @@ export default function (node, logger) {
              )
     .  end()
     .end();
+
+  node.on('write-output-from-route', function (payload, callback) {
+    const output = Bhiv.Util.getIn(payload, 'route.output');
+    return this.run(output, payload, callback);
+  });
 
   node.on('write-output-error', function ({ response, error }) {
     logger.error(error);
@@ -140,16 +171,18 @@ export default function (node, logger) {
     const lowerCase = s => String.prototype.toLowerCase.call(s);
     if (!~Object.keys(params.headers).map(lowerCase).indexOf('content-type'))
       params.headers['Content-Type'] = mime.getType(params.filepath);
-    try {
-      const file = fs.createReadStream(params.filepath);
-      file.pipe(response);
-      file.on('start', () => { response.writeHead(params.code || 200, params.headers); });
-      file.on('error', error => {
+    return this.node.send('FileSystem:get-absolute-filepath', params.filepath, (err, filepath) => {
+      try {
+        const file = fs.createReadStream(filepath);
+        file.pipe(response);
+        file.on('start', () => { response.writeHead(params.code || 200, params.headers); });
+        file.on('error', error => {
+          return this.node.send(':write-output-file-error', { response, output, error }, callback);
+        });
+      } catch (error) {
         return this.node.send(':write-output-file-error', { response, output, error }, callback);
-      });
-    } catch (error) {
-      return this.node.send(':write-output-file-error', { response, output, error }, callback);
-    }
+      }
+    });
   });
 
   node.on('write-output-file-error', function ({ response, output, error }, callback) {
@@ -166,6 +199,5 @@ export default function (node, logger) {
       return this.node.send(':write-output-error', payload, callback);
     });
   });
-
 
 };
